@@ -1,11 +1,12 @@
-import tkinter as tk
-from tkinter import ttk, messagebox
 import requests
 import pandas as pd
 import numpy as np
+import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 
+import matplotlib
+matplotlib.use("Agg")
 from matplotlib.figure import Figure
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.patches import Rectangle
 import matplotlib.dates as mdates
 
@@ -29,14 +30,6 @@ TIMEFRAMES = {
     "4H": "4h",
     "1D": "1day"
 }
-
-
-# =========================================================
-# GLOBAL
-# =========================================================
-
-canvas = None
-refresh_job = None
 
 
 # =========================================================
@@ -156,182 +149,50 @@ def calculate_indicators(data):
     low = data["Low"]
     volume = data["Volume"]
 
-    # -----------------------------------------------------
-    # EMA
-    # -----------------------------------------------------
+    data["EMA9"] = close.ewm(span=9, adjust=False).mean()
+    data["EMA18"] = close.ewm(span=18, adjust=False).mean()
+    data["EMA50"] = close.ewm(span=50, adjust=False).mean()
+    data["EMA200"] = close.ewm(span=200, adjust=False).mean()
 
-    data["EMA9"] = close.ewm(
-        span=9,
-        adjust=False
-    ).mean()
-
-    data["EMA18"] = close.ewm(
-        span=18,
-        adjust=False
-    ).mean()
-
-    data["EMA50"] = close.ewm(
-        span=50,
-        adjust=False
-    ).mean()
-
-    data["EMA200"] = close.ewm(
-        span=200,
-        adjust=False
-    ).mean()
-
-    # -----------------------------------------------------
-    # VWAP
-    # -----------------------------------------------------
-
-    typical_price = (
-        high + low + close
-    ) / 3
-
+    typical_price = (high + low + close) / 3
     cumulative_volume = volume.cumsum()
+    cumulative_volume = cumulative_volume.replace(0, np.nan)
 
-    cumulative_volume = cumulative_volume.replace(
-        0,
-        np.nan
-    )
-
-    data["VWAP"] = (
-        typical_price * volume
-    ).cumsum() / cumulative_volume
-
+    data["VWAP"] = (typical_price * volume).cumsum() / cumulative_volume
     data["VWAP"] = data["VWAP"].ffill()
-
-    # If volume is unavailable
-    data["VWAP"] = data["VWAP"].fillna(
-        typical_price
-    )
-
-    # -----------------------------------------------------
-    # RSI
-    # -----------------------------------------------------
+    data["VWAP"] = data["VWAP"].fillna(typical_price)
 
     change = close.diff()
+    gain = change.clip(lower=0)
+    loss = -change.clip(upper=0)
+    avg_gain = gain.rolling(14).mean()
+    avg_loss = loss.rolling(14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    data["RSI"] = 100 - (100 / (1 + rs))
 
-    gain = change.clip(
-        lower=0
-    )
-
-    loss = -change.clip(
-        upper=0
-    )
-
-    avg_gain = gain.rolling(
-        14
-    ).mean()
-
-    avg_loss = loss.rolling(
-        14
-    ).mean()
-
-    rs = avg_gain / avg_loss.replace(
-        0,
-        np.nan
-    )
-
-    data["RSI"] = (
-        100 -
-        (
-            100 /
-            (1 + rs)
-        )
-    )
-
-    # -----------------------------------------------------
-    # MACD
-    # -----------------------------------------------------
-
-    ema12 = close.ewm(
-        span=12,
-        adjust=False
-    ).mean()
-
-    ema26 = close.ewm(
-        span=26,
-        adjust=False
-    ).mean()
-
-    data["MACD"] = (
-        ema12 - ema26
-    )
-
-    data["MACD_SIGNAL"] = (
-        data["MACD"].ewm(
-            span=9,
-            adjust=False
-        ).mean()
-    )
-
-    data["MACD_HIST"] = (
-        data["MACD"] -
-        data["MACD_SIGNAL"]
-    )
-
-    # -----------------------------------------------------
-    # ATR
-    # -----------------------------------------------------
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    data["MACD"] = ema12 - ema26
+    data["MACD_SIGNAL"] = data["MACD"].ewm(span=9, adjust=False).mean()
+    data["MACD_HIST"] = data["MACD"] - data["MACD_SIGNAL"]
 
     tr1 = high - low
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+    true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    data["ATR"] = true_range.rolling(14).mean()
 
-    tr2 = (
-        high -
-        close.shift(1)
-    ).abs()
-
-    tr3 = (
-        low -
-        close.shift(1)
-    ).abs()
-
-    true_range = pd.concat(
-        [
-            tr1,
-            tr2,
-            tr3
-        ],
-        axis=1
-    ).max(axis=1)
-
-    data["ATR"] = (
-        true_range.rolling(
-            14
-        ).mean()
-    )
-
-    # -----------------------------------------------------
-    # SUPERTREND
-    # -----------------------------------------------------
-
-    middle = (
-        high + low
-    ) / 2
-
-    upper = (
-        middle +
-        3 * data["ATR"]
-    )
-
-    lower = (
-        middle -
-        3 * data["ATR"]
-    )
+    middle = (high + low) / 2
+    upper = middle + 3 * data["ATR"]
+    lower = middle - 3 * data["ATR"]
 
     trend = []
-
     current_trend = 1
 
     for i in range(len(data)):
 
         if i == 0:
-
-            trend.append(
-                current_trend
-            )
-
+            trend.append(current_trend)
             continue
 
         previous_upper = upper.iloc[i - 1]
@@ -339,24 +200,15 @@ def calculate_indicators(data):
         current_close = close.iloc[i]
 
         if pd.isna(previous_upper):
-
-            trend.append(
-                current_trend
-            )
-
+            trend.append(current_trend)
             continue
 
         if current_close > previous_upper:
-
             current_trend = 1
-
         elif current_close < previous_lower:
-
             current_trend = -1
 
-        trend.append(
-            current_trend
-        )
+        trend.append(current_trend)
 
     data["SUPERTREND"] = trend
 
@@ -372,27 +224,21 @@ def get_structure(data):
     recent = data.tail(30)
 
     if len(recent) < 10:
-
         return "NEUTRAL"
 
     recent_high = recent["High"]
-
     recent_low = recent["Low"]
 
     last_high = recent_high.iloc[-1]
-
     last_low = recent_low.iloc[-1]
 
     previous_high = recent_high.iloc[:-1].max()
-
     previous_low = recent_low.iloc[:-1].min()
 
     if last_high > previous_high:
-
         return "BULLISH HH"
 
     if last_low < previous_low:
-
         return "BEARISH LL"
 
     return "RANGE"
@@ -405,31 +251,18 @@ def get_structure(data):
 def get_liquidity(data):
 
     if len(data) < 10:
-
         return "NONE"
 
     previous = data.iloc[-10:-1]
-
     current = data.iloc[-1]
 
     old_high = previous["High"].max()
-
     old_low = previous["Low"].min()
 
-    if (
-        current["High"] > old_high
-        and
-        current["Close"] < old_high
-    ):
-
+    if current["High"] > old_high and current["Close"] < old_high:
         return "HIGH SWEEP"
 
-    if (
-        current["Low"] < old_low
-        and
-        current["Close"] > old_low
-    ):
-
+    if current["Low"] < old_low and current["Close"] > old_low:
         return "LOW SWEEP"
 
     return "NONE"
@@ -445,164 +278,81 @@ def calculate_prediction(data):
 
     score = 0
 
-    # EMA 9 / 18
     if last["EMA9"] > last["EMA18"]:
-
         score += 1
-
     else:
-
         score -= 1
 
-    # Price / EMA50
     if last["Close"] > last["EMA50"]:
-
         score += 1
-
     else:
-
         score -= 1
 
-    # Price / EMA200
     if last["Close"] > last["EMA200"]:
-
         score += 1
-
     else:
-
         score -= 1
 
-    # VWAP
     if last["Close"] > last["VWAP"]:
-
         score += 1
-
     else:
-
         score -= 1
 
-    # MACD
     if last["MACD"] > last["MACD_SIGNAL"]:
-
         score += 1
-
     else:
-
         score -= 1
 
-    # RSI
     if last["RSI"] > 50:
-
         score += 1
-
     else:
-
         score -= 1
 
-    # Supertrend
     if last["SUPERTREND"] == 1:
-
         score += 1
-
     else:
-
         score -= 1
 
-    # Structure
     structure = get_structure(data)
 
     if "BULLISH" in structure:
-
         score += 1
-
     elif "BEARISH" in structure:
-
         score -= 1
 
-    # Liquidity
     liquidity = get_liquidity(data)
 
     if liquidity == "LOW SWEEP":
-
         score += 1
-
     elif liquidity == "HIGH SWEEP":
-
         score -= 1
 
-    # -----------------------------------------------------
-    # SIGNAL
-    # -----------------------------------------------------
-
     if score >= 5:
-
         signal = "BUY"
-
     elif score <= -5:
-
         signal = "SELL"
-
     else:
-
         signal = "WAIT"
 
-    confidence = min(
-        95,
-        50 + abs(score) * 5
-    )
+    confidence = min(95, 50 + abs(score) * 5)
 
-    price = float(
-        last["Close"]
-    )
+    price = float(last["Close"])
+    atr = float(last["ATR"])
 
-    atr = float(
-        last["ATR"]
-    )
-
-    if (
-        not np.isfinite(atr)
-        or
-        atr <= 0
-    ):
-
+    if not np.isfinite(atr) or atr <= 0:
         atr = price * 0.002
-
-    # -----------------------------------------------------
-    # ENTRY / SL / TP
-    # -----------------------------------------------------
 
     entry = price
 
     if signal == "BUY":
-
-        sl = price - (
-            atr * 1.5
-        )
-
-        tp1 = price + (
-            atr * 1.5
-        )
-
-        tp2 = price + (
-            atr * 3
-        )
-
+        sl = price - (atr * 1.5)
+        tp1 = price + (atr * 1.5)
+        tp2 = price + (atr * 3)
     elif signal == "SELL":
-
-        sl = price + (
-            atr * 1.5
-        )
-
-        tp1 = price - (
-            atr * 1.5
-        )
-
-        tp2 = price - (
-            atr * 3
-        )
-
+        sl = price + (atr * 1.5)
+        tp1 = price - (atr * 1.5)
+        tp2 = price - (atr * 3)
     else:
-
         sl = price
         tp1 = price
         tp2 = price
@@ -627,285 +377,101 @@ def calculate_prediction(data):
 def draw_candles(ax, data):
 
     if len(data) > 1:
-
-        x1 = mdates.date2num(
-            data.index[-2]
-        )
-
-        x2 = mdates.date2num(
-            data.index[-1]
-        )
-
-        width = abs(
-            x2 - x1
-        ) * 0.65
-
+        x1 = mdates.date2num(data.index[-2])
+        x2 = mdates.date2num(data.index[-1])
+        width = abs(x2 - x1) * 0.65
     else:
-
         width = 0.01
 
     for i in range(len(data)):
 
         row = data.iloc[i]
 
-        x = mdates.date2num(
-            data.index[i]
-        )
+        x = mdates.date2num(data.index[i])
 
-        open_price = float(
-            row["Open"]
-        )
-
-        close_price = float(
-            row["Close"]
-        )
-
-        high = float(
-            row["High"]
-        )
-
-        low = float(
-            row["Low"]
-        )
+        open_price = float(row["Open"])
+        close_price = float(row["Close"])
+        high = float(row["High"])
+        low = float(row["Low"])
 
         if close_price >= open_price:
-
             candle_color = "#00d084"
-
         else:
-
             candle_color = "#ff3b30"
 
-        # Wick
-        ax.plot(
-            [x, x],
-            [low, high],
-            color=candle_color,
-            linewidth=1
-        )
+        ax.plot([x, x], [low, high], color=candle_color, linewidth=1)
 
-        # Body
-        bottom = min(
-            open_price,
-            close_price
-        )
-
-        height = abs(
-            close_price -
-            open_price
-        )
+        bottom = min(open_price, close_price)
+        height = abs(close_price - open_price)
 
         if height == 0:
-
             height = 0.01
 
         rectangle = Rectangle(
-            (
-                x - width / 2,
-                bottom
-            ),
+            (x - width / 2, bottom),
             width,
             height,
             facecolor=candle_color,
             edgecolor=candle_color
         )
 
-        ax.add_patch(
-            rectangle
-        )
+        ax.add_patch(rectangle)
 
 
 # =========================================================
-# CREATE CHART
+# CREATE CHART (returns a Figure for st.pyplot)
 # =========================================================
 
 def create_chart(data, result, timeframe):
 
-    global canvas
+    fig = Figure(figsize=(15, 8), dpi=100, facecolor="#071018")
 
-    fig = Figure(
-        figsize=(15, 8),
-        dpi=100,
-        facecolor="#071018"
-    )
+    ax = fig.add_axes([0.05, 0.38, 0.70, 0.54])
+    macd_ax = fig.add_axes([0.05, 0.21, 0.70, 0.12], sharex=ax)
+    rsi_ax = fig.add_axes([0.05, 0.06, 0.70, 0.11], sharex=ax)
+    panel = fig.add_axes([0.78, 0.06, 0.20, 0.86])
 
-    ax = fig.add_axes(
-        [0.05, 0.38, 0.70, 0.54]
-    )
-
-    macd_ax = fig.add_axes(
-        [0.05, 0.21, 0.70, 0.12],
-        sharex=ax
-    )
-
-    rsi_ax = fig.add_axes(
-        [0.05, 0.06, 0.70, 0.11],
-        sharex=ax
-    )
-
-    panel = fig.add_axes(
-        [0.78, 0.06, 0.20, 0.86]
-    )
-
-    axes = [
-        ax,
-        macd_ax,
-        rsi_ax
-    ]
+    axes = [ax, macd_ax, rsi_ax]
 
     for current_ax in axes:
-
-        current_ax.set_facecolor(
-            "#071018"
-        )
-
-        current_ax.tick_params(
-            colors="white",
-            labelsize=7
-        )
-
+        current_ax.set_facecolor("#071018")
+        current_ax.tick_params(colors="white", labelsize=7)
         for spine in current_ax.spines.values():
+            spine.set_color("#26333f")
+        current_ax.grid(True, alpha=0.15)
 
-            spine.set_color(
-                "#26333f"
-            )
+    draw_candles(ax, data)
 
-        current_ax.grid(
-            True,
-            alpha=0.15
-        )
-
-    # =====================================================
-    # CANDLES
-    # =====================================================
-
-    draw_candles(
-        ax,
-        data
-    )
-
-    # =====================================================
-    # EMAs
-    # =====================================================
-
-    ax.plot(
-        data.index,
-        data["EMA9"],
-        color="#00a8ff",
-        linewidth=1.3,
-        label="EMA 9"
-    )
-
-    ax.plot(
-        data.index,
-        data["EMA18"],
-        color="#ff9800",
-        linewidth=1.3,
-        label="EMA 18"
-    )
-
-    ax.plot(
-        data.index,
-        data["EMA50"],
-        color="#f5d90a",
-        linewidth=1,
-        label="EMA 50"
-    )
-
-    ax.plot(
-        data.index,
-        data["EMA200"],
-        color="#ff3b30",
-        linewidth=1,
-        label="EMA 200"
-    )
-
-    # VWAP
-    ax.plot(
-        data.index,
-        data["VWAP"],
-        color="#b45cff",
-        linewidth=1.3,
-        label="VWAP"
-    )
-
-    # =====================================================
-    # SUPPORT / RESISTANCE
-    # =====================================================
+    ax.plot(data.index, data["EMA9"], color="#00a8ff", linewidth=1.3, label="EMA 9")
+    ax.plot(data.index, data["EMA18"], color="#ff9800", linewidth=1.3, label="EMA 18")
+    ax.plot(data.index, data["EMA50"], color="#f5d90a", linewidth=1, label="EMA 50")
+    ax.plot(data.index, data["EMA200"], color="#ff3b30", linewidth=1, label="EMA 200")
+    ax.plot(data.index, data["VWAP"], color="#b45cff", linewidth=1.3, label="VWAP")
 
     support = data["Low"].tail(50).min()
-
     resistance = data["High"].tail(50).max()
 
-    ax.axhline(
-        support,
-        color="#00a8ff",
-        linestyle=":",
-        linewidth=1
-    )
-
-    ax.axhline(
-        resistance,
-        color="#ff9800",
-        linestyle=":",
-        linewidth=1
-    )
-
-    # =====================================================
-    # ENTRY SL TP
-    # =====================================================
+    ax.axhline(support, color="#00a8ff", linestyle=":", linewidth=1)
+    ax.axhline(resistance, color="#ff9800", linestyle=":", linewidth=1)
 
     signal = result["signal"]
 
     if signal == "BUY":
-
         signal_color = "#00d084"
-
     elif signal == "SELL":
-
         signal_color = "#ff3b30"
-
     else:
-
         signal_color = "#ffd60a"
 
-    ax.axhline(
-        result["entry"],
-        color="#00a8ff",
-        linestyle="--",
-        linewidth=1
-    )
+    ax.axhline(result["entry"], color="#00a8ff", linestyle="--", linewidth=1)
 
     if signal != "WAIT":
-
-        ax.axhline(
-            result["sl"],
-            color="#ff3b30",
-            linestyle="--",
-            linewidth=1
-        )
-
-        ax.axhline(
-            result["tp1"],
-            color="#00d084",
-            linestyle="--",
-            linewidth=1
-        )
-
-        ax.axhline(
-            result["tp2"],
-            color="#00d084",
-            linestyle=":",
-            linewidth=1
-        )
-
-    # =====================================================
-    # TITLE
-    # =====================================================
+        ax.axhline(result["sl"], color="#ff3b30", linestyle="--", linewidth=1)
+        ax.axhline(result["tp1"], color="#00d084", linestyle="--", linewidth=1)
+        ax.axhline(result["tp2"], color="#00d084", linestyle=":", linewidth=1)
 
     ax.text(
-        0.01,
-        0.95,
+        0.01, 0.95,
         f"XAU/USD | {timeframe}",
         transform=ax.transAxes,
         color="white",
@@ -913,206 +479,48 @@ def create_chart(data, result, timeframe):
         fontweight="bold"
     )
 
-    ax.legend(
-        loc="upper left",
-        fontsize=7,
-        facecolor="#101c27",
-        labelcolor="white"
-    )
+    ax.legend(loc="upper left", fontsize=7, facecolor="#101c27", labelcolor="white")
 
-    # =====================================================
-    # MACD
-    # =====================================================
+    macd_colors = np.where(data["MACD_HIST"] >= 0, "#00d084", "#ff3b30")
 
-    macd_colors = np.where(
-        data["MACD_HIST"] >= 0,
-        "#00d084",
-        "#ff3b30"
-    )
+    macd_ax.bar(data.index, data["MACD_HIST"], color=macd_colors, width=0.7)
+    macd_ax.plot(data.index, data["MACD"], color="#00a8ff", linewidth=1)
+    macd_ax.plot(data.index, data["MACD_SIGNAL"], color="#ff9800", linewidth=1)
+    macd_ax.set_ylabel("MACD", color="white", fontsize=8)
 
-    macd_ax.bar(
-        data.index,
-        data["MACD_HIST"],
-        color=macd_colors,
-        width=0.7
-    )
+    rsi_ax.plot(data.index, data["RSI"], color="#b45cff", linewidth=1.3)
+    rsi_ax.axhline(70, color="#ff3b30", linestyle="--", linewidth=0.7)
+    rsi_ax.axhline(30, color="#00d084", linestyle="--", linewidth=0.7)
+    rsi_ax.set_ylim(0, 100)
+    rsi_ax.set_ylabel("RSI", color="white", fontsize=8)
 
-    macd_ax.plot(
-        data.index,
-        data["MACD"],
-        color="#00a8ff",
-        linewidth=1
-    )
-
-    macd_ax.plot(
-        data.index,
-        data["MACD_SIGNAL"],
-        color="#ff9800",
-        linewidth=1
-    )
-
-    macd_ax.set_ylabel(
-        "MACD",
-        color="white",
-        fontsize=8
-    )
-
-    # =====================================================
-    # RSI
-    # =====================================================
-
-    rsi_ax.plot(
-        data.index,
-        data["RSI"],
-        color="#b45cff",
-        linewidth=1.3
-    )
-
-    rsi_ax.axhline(
-        70,
-        color="#ff3b30",
-        linestyle="--",
-        linewidth=0.7
-    )
-
-    rsi_ax.axhline(
-        30,
-        color="#00d084",
-        linestyle="--",
-        linewidth=0.7
-    )
-
-    rsi_ax.set_ylim(
-        0,
-        100
-    )
-
-    rsi_ax.set_ylabel(
-        "RSI",
-        color="white",
-        fontsize=8
-    )
-
-    # =====================================================
-    # INFORMATION PANEL
-    # =====================================================
-
-    panel.set_facecolor(
-        "#0b151f"
-    )
-
+    panel.set_facecolor("#0b151f")
     panel.set_xticks([])
     panel.set_yticks([])
 
     for spine in panel.spines.values():
+        spine.set_color("#26333f")
 
-        spine.set_color(
-            "#26333f"
-        )
+    panel.text(0.5, 0.95, "MARKET PREDICTION", ha="center", color="white", fontsize=12, fontweight="bold")
+    panel.text(0.5, 0.85, signal, ha="center", color=signal_color, fontsize=28, fontweight="bold")
+    panel.text(0.5, 0.76, f"{result['confidence']:.0f}%", ha="center", color=signal_color, fontsize=22, fontweight="bold")
+    panel.text(0.5, 0.71, "CONFIDENCE", ha="center", color="#9ba9b5", fontsize=8)
 
-    panel.text(
-        0.5,
-        0.95,
-        "MARKET PREDICTION",
-        ha="center",
-        color="white",
-        fontsize=12,
-        fontweight="bold"
-    )
-
-    panel.text(
-        0.5,
-        0.85,
-        signal,
-        ha="center",
-        color=signal_color,
-        fontsize=28,
-        fontweight="bold"
-    )
-
-    panel.text(
-        0.5,
-        0.76,
-        f"{result['confidence']:.0f}%",
-        ha="center",
-        color=signal_color,
-        fontsize=22,
-        fontweight="bold"
-    )
-
-    panel.text(
-        0.5,
-        0.71,
-        "CONFIDENCE",
-        ha="center",
-        color="#9ba9b5",
-        fontsize=8
-    )
-
-    panel.text(
-        0.08,
-        0.62,
-        f"ENTRY\n{result['entry']:.2f}",
-        color="#00a8ff",
-        fontsize=9
-    )
-
-    panel.text(
-        0.08,
-        0.52,
-        f"STOP LOSS\n{result['sl']:.2f}",
-        color="#ff3b30",
-        fontsize=9
-    )
-
-    panel.text(
-        0.08,
-        0.42,
-        f"TP 1\n{result['tp1']:.2f}",
-        color="#00d084",
-        fontsize=9
-    )
-
-    panel.text(
-        0.08,
-        0.32,
-        f"TP 2\n{result['tp2']:.2f}",
-        color="#00d084",
-        fontsize=9
-    )
+    panel.text(0.08, 0.62, f"ENTRY\n{result['entry']:.2f}", color="#00a8ff", fontsize=9)
+    panel.text(0.08, 0.52, f"STOP LOSS\n{result['sl']:.2f}", color="#ff3b30", fontsize=9)
+    panel.text(0.08, 0.42, f"TP 1\n{result['tp1']:.2f}", color="#00d084", fontsize=9)
+    panel.text(0.08, 0.32, f"TP 2\n{result['tp2']:.2f}", color="#00d084", fontsize=9)
 
     last = data.iloc[-1]
 
-    panel.text(
-        0.08,
-        0.25,
-        "INDICATORS",
-        color="white",
-        fontsize=10,
-        fontweight="bold"
-    )
+    panel.text(0.08, 0.25, "INDICATORS", color="white", fontsize=10, fontweight="bold")
 
-    ema_status = (
-        "Bullish"
-        if last["EMA9"] > last["EMA18"]
-        else "Bearish"
-    )
-
-    vwap_status = (
-        "Above"
-        if last["Close"] > last["VWAP"]
-        else "Below"
-    )
-
-    supertrend_status = (
-        "Bullish"
-        if last["SUPERTREND"] == 1
-        else "Bearish"
-    )
+    ema_status = "Bullish" if last["EMA9"] > last["EMA18"] else "Bearish"
+    vwap_status = "Above" if last["Close"] > last["VWAP"] else "Below"
+    supertrend_status = "Bullish" if last["SUPERTREND"] == 1 else "Bearish"
 
     panel.text(
-        0.08,
-        0.20,
+        0.08, 0.20,
         f"EMA 9/18: {ema_status}\n"
         f"VWAP: {vwap_status}\n"
         f"Supertrend: {supertrend_status}\n"
@@ -1136,252 +544,55 @@ def create_chart(data, result, timeframe):
         y=0.985
     )
 
-    # Remove old chart
-    if canvas is not None:
+    return fig
 
-        canvas.get_tk_widget().destroy()
 
-    canvas = FigureCanvasTkAgg(
-        fig,
-        master=chart_frame
+# =========================================================
+# STREAMLIT APP (replaces the old Tkinter GUI)
+# =========================================================
+
+st.set_page_config(
+    page_title="GOLD MARKET PREDICTION",
+    layout="wide"
+)
+
+# Auto-refresh the whole app every AUTO_REFRESH_SECONDS, just like the
+# old Tkinter root.after() loop used to do.
+st_autorefresh(interval=AUTO_REFRESH_SECONDS * 1000, key="gold_auto_refresh")
+
+st.title("XAU/USD GOLD — Live Market Prediction")
+st.caption("● LIVE — data refreshes automatically every 30 seconds")
+
+col1, col2 = st.columns([1, 4])
+
+with col1:
+    timeframe = st.selectbox(
+        "Timeframe",
+        list(TIMEFRAMES.keys()),
+        index=1  # defaults to "5M", same as the old app
     )
 
-    canvas.draw()
+status_placeholder = st.empty()
+chart_placeholder = st.empty()
 
-    canvas.get_tk_widget().pack(
-        fill=tk.BOTH,
-        expand=True
+status_placeholder.info("Connecting to live XAU/USD data...")
+
+try:
+    data = get_data(timeframe)
+    data = calculate_indicators(data)
+    result = calculate_prediction(data)
+    fig = create_chart(data, result, timeframe)
+
+    chart_placeholder.pyplot(fig, use_container_width=True)
+
+    last_price = data["Close"].iloc[-1]
+
+    status_placeholder.success(
+        f"LIVE XAU/USD | {timeframe} | "
+        f"Price: {last_price:.2f} | "
+        f"Signal: {result['signal']} | "
+        f"Confidence: {result['confidence']:.0f}%"
     )
 
-
-# =========================================================
-# ANALYZE
-# =========================================================
-
-def run_analysis():
-
-    try:
-
-        status_label.config(
-            text="Connecting to live XAU/USD data..."
-        )
-
-        root.update_idletasks()
-
-        timeframe = timeframe_var.get()
-
-        data = get_data(
-            timeframe
-        )
-
-        data = calculate_indicators(
-            data
-        )
-
-        result = calculate_prediction(
-            data
-        )
-
-        create_chart(
-            data,
-            result,
-            timeframe
-        )
-
-        last_price = data["Close"].iloc[-1]
-
-        status_label.config(
-            text=(
-                f"LIVE XAU/USD | "
-                f"{timeframe} | "
-                f"Price: {last_price:.2f} | "
-                f"Signal: {result['signal']} | "
-                f"Confidence: "
-                f"{result['confidence']:.0f}%"
-            )
-        )
-
-    except Exception as error:
-
-        messagebox.showerror(
-            "Market Data Error",
-            str(error)
-        )
-
-        status_label.config(
-            text="Unable to load market data."
-        )
-
-
-# =========================================================
-# AUTO REFRESH
-# =========================================================
-
-def auto_refresh():
-
-    run_analysis()
-
-    global refresh_job
-
-    refresh_job = root.after(
-        AUTO_REFRESH_SECONDS * 1000,
-        auto_refresh
-    )
-
-
-# =========================================================
-# GUI
-# =========================================================
-
-root = tk.Tk()
-
-root.title(
-    "GOLD MARKET PREDICTION"
-)
-
-root.geometry(
-    "1450x900"
-)
-
-root.configure(
-    bg="#071018"
-)
-
-
-# =========================================================
-# HEADER
-# =========================================================
-
-header = tk.Frame(
-    root,
-    bg="#0b151f",
-    height=65
-)
-
-header.pack(
-    fill=tk.X
-)
-
-header.pack_propagate(
-    False
-)
-
-title = tk.Label(
-    header,
-    text="XAU/USD GOLD",
-    bg="#0b151f",
-    fg="white",
-    font=("Arial", 20, "bold")
-)
-
-title.pack(
-    side=tk.LEFT,
-    padx=20
-)
-
-
-# =========================================================
-# LIVE LABEL
-# =========================================================
-
-live_label = tk.Label(
-    header,
-    text="● LIVE",
-    bg="#0b151f",
-    fg="#00d084",
-    font=("Arial", 11, "bold")
-)
-
-live_label.pack(
-    side=tk.LEFT,
-    padx=10
-)
-
-
-# =========================================================
-# TIMEFRAME
-# =========================================================
-
-timeframe_var = tk.StringVar(
-    value="5M"
-)
-
-timeframe_box = ttk.Combobox(
-    header,
-    textvariable=timeframe_var,
-    values=list(
-        TIMEFRAMES.keys()
-    ),
-    state="readonly",
-    width=8
-)
-
-timeframe_box.pack(
-    side=tk.RIGHT,
-    padx=20
-)
-
-
-# =========================================================
-# ANALYZE BUTTON
-# =========================================================
-
-analyze_button = tk.Button(
-    header,
-    text="ANALYZE",
-    command=run_analysis,
-    bg="#087f5b",
-    fg="white",
-    activebackground="#00a86b",
-    font=("Arial", 11, "bold"),
-    width=12
-)
-
-analyze_button.pack(
-    side=tk.RIGHT,
-    padx=5
-)
-
-
-# =========================================================
-# CHART FRAME
-# =========================================================
-
-chart_frame = tk.Frame(
-    root,
-    bg="#071018"
-)
-
-chart_frame.pack(
-    fill=tk.BOTH,
-    expand=True,
-    padx=8,
-    pady=8
-)
-
-
-# =========================================================
-# STATUS
-# =========================================================
-
-status_label = tk.Label(
-    root,
-    text="Select timeframe and click ANALYZE",
-    bg="#0b151f",
-    fg="#00d084",
-    anchor="w",
-    font=("Arial", 10)
-)
-
-status_label.pack(
-    fill=tk.X,
-    padx=8,
-    pady=5
-)
-
-
-# =========================================================
-# START
-# =========================================================
-
-root.mainloop()
+except Exception as error:
+    status_placeholder.error(f"Market Data Error: {error}")
